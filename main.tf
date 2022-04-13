@@ -1,129 +1,93 @@
-# Specify AWS provider
-terraform {
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 3.27"
-    }
+resource "aws_autoscaling_group" "asg" {
+  name                 = "wordpress-${terraform.workspace}"
+  desired_capacity     = 2
+  min_size             = 2
+  max_size             = 3
+  termination_policies = ["OldestInstance"]
+
+  launch_template {
+    id      = aws_launch_template.template.id
+    version = "$Latest"
   }
-  required_version = "~> 1.1.5" # 1.1.5 or above and below 1.2.0
 }
 
-provider "aws" {
-  profile = "default"
-  region  = "us-east-1"
-}
+resource "aws_launch_template" "template" {
+  name                   = "wordpress-${terraform.workspace}"
+  instance_type          = var.instance_type
+  image_id               = data.aws_ami.ami.id
+  ebs_optimized          = true
+  vpc_security_group_ids = [aws_security_group.ec2_secgrp.id]
 
-#amazon instance
-data "aws_ami" "ami-amzn2" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  credit_specification {
+    cpu_credits = "standard"
   }
 
-}
+  iam_instance_profile {
+    arn = aws_iam_instance_profile.profile.arn
+  }
 
-
-
-# Get VPC id of default VPC
-data "aws_vpc" "default" {
-  default = true
-}
-
-# local variables
-locals {
-  default_tags = module.gloabl_vars.default_tags
-  name_prefix  = "${module.gloabl_vars.prefix}-${module.gloabl_vars.env}"
-}
-
-# Retrieve default tags
-module "gloabl_vars" {
-  source = "../modules/global_vars"
-}
-# Provision SSH key pair for Linux VMs
-resource "aws_key_pair" "linux_key" {
-  key_name   = "linux_key"
-  public_key = file(var.path_to_linux_key)
-    tags = merge({
-    Name = "${local.name_prefix}-keypair"
-    },
-    local.default_tags
-  )
-}
-
-# Security Groups that allows SSH and HTTP access
-module "linux_sg" {
-  source     = "cloudposse/security-group/aws"
-  version    = "0.4.3"
-  attributes = ["primary"]
-
-  # Allow unlimited egress
-  allow_all_egress = true
-
-  rules = [
-    {
-      key         = "ssh"
-      type        = "ingress"
-      from_port   = 22
-      to_port     = 22
-      protocol    = "tcp"
-      cidr_blocks = ["0.0.0.0/0"]
-      self        = null
-      description = "Allow SSH from anywhere"
-    },
-    {
-      key         = "HTTP"
-      type        = "ingress"
-      from_port   = 80
-      to_port     = 80
-      protocol    = "tcp"
-      cidr_blocks = ["0.0.0.0/0"]
-      self        = null
-      description = "Allow HTTP from anywhere"
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name   = "wordpress-${terraform.workspace}"
+      Source = "Autoscaling"
     }
+  }
+
+  user_data = data.template_file.userdata.rendered
+
+}
+
+resource "aws_security_group" "ec2_secgrp" {
+  name        = "wordpress-instance-secgrp"
+  description = "wordpress instance secgrp"
+  vpc_id      = aws_default_vpc.default.id
+
+  ingress {
+    from_port   = var.nginx_port
+    to_port     = var.nginx_port
+    protocol    = "tcp"
+    cidr_blocks = [aws_default_vpc.default.cidr_block]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "wordpress-ec2-secgrp"
+  }
+
+}
+
+resource "aws_default_vpc" "default" {
+}
+
+resource "aws_iam_instance_profile" "profile" {
+  name = "wordpress-${terraform.workspace}"
+  role = aws_iam_role.role.name
+}
+
+resource "aws_iam_role" "role" {
+  name               = "wordpress-${terraform.workspace}"
+  assume_role_policy = data.aws_iam_policy_document.assume_policy.json
+  managed_policy_arns = [
+    "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role",
+    "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
   ]
-
-  vpc_id = data.aws_vpc.default.id
-  tags = merge({
-    Name = "${local.name_prefix}-LinuxServer-sg"
-    },
-    local.default_tags
-  )
 }
 
-# Create Amazon Linux EC2 instances in a default VPC
-resource "aws_instance" "linux_vm" {
-  count                  = var.num_linux_vms
-  ami                    = data.aws_ami.ami-amzn2.id
-  key_name               = aws_key_pair.linux_key.key_name
-  instance_type          = var.linux_instance_type
-  vpc_security_group_ids = [module.linux_sg.id]
-  tags = merge({
-    Name = "${local.name_prefix}-LinuxServer-${count.index}"
-    Type = "Amazon"
-    Environment = "Assignment_3"
-    },
-    local.default_tags
-  )
-}
-
-resource "aws_instance" "linux_ubuntu" {
-  count                  = var.num_ubuntu_vms
-  ami                    = "ami-04505e74c0741db8d"
-  key_name               = aws_key_pair.linux_key.key_name
-  instance_type          = var.linux_instance_type
-  vpc_security_group_ids = [module.linux_sg.id]
-  tags = merge({
-    Name = "${local.name_prefix}-LinuxUbuntu-${count.index}"
-    Type = "Ubuntu"
-    Environment = "Assignment_3"
-    },
-    local.default_tags
-  )
-}
 
 
 
